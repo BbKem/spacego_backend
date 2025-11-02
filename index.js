@@ -5,7 +5,10 @@ const { Pool } = require('pg')
 require('dotenv').config()
 
 const app = express()
-app.use(cors())
+app.use(cors({
+  origin: '*', 
+  credentials: true
+}))
 app.use(bodyParser.json())
 
 // Подключение к PostgreSQL
@@ -53,10 +56,7 @@ app.post('/api/ads', async (req, res) => {
     return res.status(400).json({ error: 'Не хватает данных' })
   }
 
-  const userId = parseUserIdFromInitData(initData)
-  if (!userId) {
-    return res.status(401).json({ error: 'Неверная авторизация' })
-  }
+ const userId = 123456789
 
   try {
     const result = await pool.query(
