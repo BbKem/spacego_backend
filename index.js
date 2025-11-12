@@ -5,12 +5,10 @@ const { Pool } = require('pg')
 const bcrypt = require('bcryptjs')
 const jwt = require('jsonwebtoken')
 const multer = require('multer')
-const sharp = require('sharp')
 require('dotenv').config()
 
 const app = express()
 
-// Увеличиваем лимиты для обработки base64 изображений
 app.use(cors({
   origin: [
     'http://localhost:5173',
@@ -20,8 +18,8 @@ app.use(cors({
   ],
   credentials: true
 }))
-app.use(bodyParser.json({ limit: '10mb' }))
-app.use(bodyParser.urlencoded({ extended: true, limit: '10mb' }))
+app.use(bodyParser.json({ limit: '5mb' }))
+app.use(bodyParser.urlencoded({ extended: true, limit: '5mb' }))
 
 // Подключение к PostgreSQL
 const pool = new Pool({
@@ -36,7 +34,7 @@ const storage = multer.memoryStorage()
 const upload = multer({
   storage: storage,
   limits: {
-    fileSize: 2 * 1024 * 1024, // 2MB максимум
+    fileSize: 500 * 1024, // 500KB максимум для экономии места
   },
   fileFilter: (req, file, cb) => {
     if (file.mimetype.startsWith('image/')) {
@@ -47,29 +45,20 @@ const upload = multer({
   }
 })
 
-// Функция для сжатия изображения
-async function compressImage(buffer) {
-  try {
-    const compressedBuffer = await sharp(buffer)
-      .resize(600, 600, {
-        fit: 'inside',
-        withoutEnlargement: true
-      })
-      .jpeg({ 
-        quality: 65,
-        progressive: true
-      })
-      .toBuffer()
-    
-    const base64Image = compressedBuffer.toString('base64')
-    const dataUrl = `data:image/jpeg;base64,${base64Image}`
-    
-    return {
-      dataUrl,
-      size: compressedBuffer.length
-    }
-  } catch (error) {
-    throw new Error('Ошибка обработки изображения')
+// Функция для конвертации в base64 с проверкой размера
+function processImage(buffer, mimeType) {
+  // Проверяем размер
+  if (buffer.length > 500 * 1024) {
+    throw new Error('Изображение слишком большое. Максимум 500KB.')
+  }
+  
+  // Конвертируем в base64
+  const base64Image = buffer.toString('base64')
+  const dataUrl = `data:${mimeType};base64,${base64Image}`
+  
+  return {
+    dataUrl,
+    size: buffer.length
   }
 }
 
@@ -174,12 +163,12 @@ app.post('/api/ads', upload.single('photo'), async (req, res) => {
     // Обрабатываем фото если есть
     if (req.file) {
       try {
-        const compressedImage = await compressImage(req.file.buffer)
-        photoUrl = compressedImage.dataUrl
-        console.log(`✅ Изображение сжато: ${Math.round(compressedImage.size / 1024)}KB`)
-      } catch (compressError) {
-        console.error('Ошибка сжатия изображения:', compressError)
-        return res.status(400).json({ error: 'Ошибка обработки изображения' })
+        const processedImage = processImage(req.file.buffer, req.file.mimetype)
+        photoUrl = processedImage.dataUrl
+        console.log(`✅ Изображение обработано: ${Math.round(processedImage.size / 1024)}KB`)
+      } catch (processError) {
+        console.error('Ошибка обработки изображения:', processError)
+        return res.status(400).json({ error: processError.message })
       }
     }
 
@@ -226,15 +215,21 @@ app.get('/api/user', async (req, res) => {
 app.use((error, req, res, next) => {
   if (error instanceof multer.MulterError) {
     if (error.code === 'LIMIT_FILE_SIZE') {
-      return res.status(400).json({ error: 'Файл слишком большой. Максимум 2MB.' })
+      return res.status(400).json({ error: 'Файл слишком большой. Максимум 500KB.' })
     }
   }
   res.status(500).json({ error: error.message })
 })
 
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.status(200).json({ status: 'OK', message: 'Server is running' })
+})
+
 // Запуск сервера
 const PORT = process.env.PORT || 4000
 app.listen(PORT, () => {
-  console.log(`🚀 Сервер запущен на http://localhost:${PORT}`)
-  console.log(`📸 Модуль работы с фото активирован`)
+  console.log(`🚀 Сервер запущен на порту ${PORT}`)
+  console.log(`📸 Модуль работы с фото активирован (базовая версия)`)
+  console.log(`✅ Health check доступен по /health`)
 })
