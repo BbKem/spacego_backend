@@ -121,12 +121,12 @@ app.get('/api/categories', async (req, res) => {
   }
 })
 
-// Получение всех объявлений
+// Получение всех объявлений (ОБНОВЛЕННЫЙ - добавлен user_id)
 app.get('/api/ads', async (req, res) => {
   try {
     const result = await pool.query(`
       SELECT 
-        a.id, a.title, a.description, a.price, a.condition, a.created_at, a.photo_url,
+        a.id, a.title, a.description, a.price, a.condition, a.created_at, a.photo_url, a.user_id,
         c.name AS category_name
       FROM ads a
       LEFT JOIN categories c ON a.category_id = c.id
@@ -140,8 +140,8 @@ app.get('/api/ads', async (req, res) => {
   }
 })
 
-// Добавление объявления с фото
-app.post('/api/ads', upload.single('photo'), async (req, res) => {
+// Добавление объявления с несколькими фото (до 10)
+app.post('/api/ads', upload.array('photos', 10), async (req, res) => {
   const { title, description, price, categoryId, condition } = req.body
   const authHeader = req.headers.authorization
 
@@ -158,36 +158,53 @@ app.post('/api/ads', upload.single('photo'), async (req, res) => {
       return res.status(400).json({ error: 'Все поля обязательны' })
     }
 
-    let photoUrl = null
-
-    // Обрабатываем фото если есть
-    if (req.file) {
-      try {
-        const processedImage = processImage(req.file.buffer, req.file.mimetype)
-        photoUrl = processedImage.dataUrl
-        console.log(`✅ Изображение обработано: ${Math.round(processedImage.size / 1024)}KB`)
-      } catch (processError) {
-        console.error('Ошибка обработки изображения:', processError)
-        return res.status(400).json({ error: processError.message })
+    // Обрабатываем до 10 фото
+    let photoUrls = []
+    if (req.files && req.files.length > 0) {
+      for (let i = 0; i < Math.min(req.files.length, 10); i++) {
+        const file = req.files[i]
+        try {
+          const processedImage = processImage(file.buffer, file.mimetype)
+          photoUrls.push(processedImage.dataUrl)
+          console.log(`✅ Фото ${i + 1} обработано: ${Math.round(processedImage.size / 1024)}KB`)
+        } catch (err) {
+          console.error(`Ошибка обработки фото ${i + 1}:`, err.message)
+          return res.status(400).json({ error: `Ошибка фото ${i + 1}: ${err.message}` })
+        }
       }
     }
+
+    // Сохраняем как JSON-массив в photo_url (TEXT поле)
+    const photoUrlJson = photoUrls.length > 0 ? JSON.stringify(photoUrls) : null
 
     const result = await pool.query(
       `INSERT INTO ads (user_id, category_id, title, description, price, condition, photo_url)
        VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING 
-         id, title, description, price, condition, created_at, photo_url`,
-      [userId, categoryId, title, description, parseFloat(price), condition, photoUrl]
+         id, title, description, price, condition, created_at, photo_url, user_id`,
+      [userId, categoryId, title, description, parseFloat(price), condition, photoUrlJson]
     )
 
-    res.json({ success: true, ad: result.rows[0] })
+    // Парсим photo_url обратно в массив для ответа
+    const ad = result.rows[0]
+    if (ad.photo_url) {
+      try {
+        ad.photo_urls = JSON.parse(ad.photo_url)
+        delete ad.photo_url
+      } catch (e) {
+        ad.photo_urls = []
+      }
+    } else {
+      ad.photo_urls = []
+    }
 
+    res.json({ success: true, ad })
   } catch (err) {
     console.error('Ошибка создания объявления:', err)
     res.status(500).json({ error: 'Ошибка сохранения объявления' })
   }
 })
 
-// Получение информации о пользователе
+// Получение информации о текущем пользователе
 app.get('/api/user', async (req, res) => {
   const authHeader = req.headers.authorization
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -199,7 +216,7 @@ app.get('/api/user', async (req, res) => {
     const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret')
     const userId = decoded.userId
 
-    const result = await pool.query('SELECT id, email FROM users WHERE id = $1', [userId])
+    const result = await pool.query('SELECT id, email, created_at FROM users WHERE id = $1', [userId])
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Пользователь не найден' })
     }
@@ -210,6 +227,37 @@ app.get('/api/user', async (req, res) => {
     res.status(500).json({ error: 'Ошибка загрузки профиля' })
   }
 })
+
+// Получение информации о пользователе по ID (НОВЫЙ ЭНДПОИНТ)
+app.get('/api/user/:userId', async (req, res) => {
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Требуется авторизация' });
+  }
+
+  const token = authHeader.split(' ')[1];
+  const { userId } = req.params;
+
+  try {
+    // Проверяем токен (но не ограничиваем доступ только своим профилем)
+    jwt.verify(token, process.env.JWT_SECRET || 'secret');
+    
+    const result = await pool.query(
+      'SELECT id, email, created_at FROM users WHERE id = $1',
+      [userId]
+    );
+    
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Пользователь не найден' });
+    }
+
+    const user = result.rows[0];
+    res.json({ success: true, user });
+  } catch (err) {
+    console.error('Ошибка загрузки пользователя:', err);
+    res.status(500).json({ error: 'Ошибка загрузки данных пользователя' });
+  }
+});
 
 // Обработчик ошибок multer
 app.use((error, req, res, next) => {
