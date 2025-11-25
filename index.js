@@ -34,7 +34,7 @@ const storage = multer.memoryStorage()
 const upload = multer({
   storage: storage,
   limits: {
-    fileSize: 500 * 1024, // 500KB максимум для экономии места
+    fileSize: 5000 * 1024, // 500KB максимум для экономии места
   },
   fileFilter: (req, file, cb) => {
     if (file.mimetype.startsWith('image/')) {
@@ -48,7 +48,7 @@ const upload = multer({
 // Функция для конвертации в base64 с проверкой размера
 function processImage(buffer, mimeType) {
   // Проверяем размер
-  if (buffer.length > 500 * 1024) {
+  if (buffer.length > 5000 * 1024) {
     throw new Error('Изображение слишком большое. Максимум 500KB.')
   }
   
@@ -126,7 +126,7 @@ app.get('/api/ads', async (req, res) => {
   try {
     const result = await pool.query(`
       SELECT 
-        a.id, a.title, a.description, a.price, a.condition, a.created_at, a.photo_url, a.user_id,
+        a.id, a.title, a.description, a.price, a.condition, a.created_at, a.photo_url, a.user_id, a.location,
         c.name AS category_name
       FROM ads a
       LEFT JOIN categories c ON a.category_id = c.id
@@ -140,9 +140,9 @@ app.get('/api/ads', async (req, res) => {
   }
 })
 
-// Добавление объявления с несколькими фото (до 10)
+// Добавление объявления с несколькими фото и геолокацией (ОБНОВЛЕННЫЙ)
 app.post('/api/ads', upload.array('photos', 10), async (req, res) => {
-  const { title, description, price, categoryId, condition } = req.body
+  const { title, description, price, categoryId, condition, location } = req.body
   const authHeader = req.headers.authorization
 
   if (!authHeader || !authHeader.startsWith('Bearer ')) {
@@ -178,10 +178,10 @@ app.post('/api/ads', upload.array('photos', 10), async (req, res) => {
     const photoUrlJson = photoUrls.length > 0 ? JSON.stringify(photoUrls) : null
 
     const result = await pool.query(
-      `INSERT INTO ads (user_id, category_id, title, description, price, condition, photo_url)
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING 
-         id, title, description, price, condition, created_at, photo_url, user_id`,
-      [userId, categoryId, title, description, parseFloat(price), condition, photoUrlJson]
+      `INSERT INTO ads (user_id, category_id, title, description, price, condition, photo_url, location)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING 
+         id, title, description, price, condition, created_at, photo_url, user_id, location`,
+      [userId, categoryId, title, description, parseFloat(price), condition, photoUrlJson, location || null]
     )
 
     // Парсим photo_url обратно в массив для ответа
