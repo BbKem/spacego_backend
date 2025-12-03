@@ -140,7 +140,7 @@ app.get('/api/ads', async (req, res) => {
   }
 })
 
-// Добавление объявления с несколькими фото и геолокацией (ОБНОВЛЕННЫЙ)
+// Добавление объявления с несколькими фото и геолокацией (ИСПРАВЛЕННЫЙ - добавлен category_name)
 app.post('/api/ads', upload.array('photos', 10), async (req, res) => {
   const { title, description, price, categoryId, condition, location } = req.body
   const authHeader = req.headers.authorization
@@ -177,15 +177,27 @@ app.post('/api/ads', upload.array('photos', 10), async (req, res) => {
     // Сохраняем как JSON-массив в photo_url (TEXT поле)
     const photoUrlJson = photoUrls.length > 0 ? JSON.stringify(photoUrls) : null
 
-    const result = await pool.query(
+    // Вставляем объявление и получаем его ID
+    const insertResult = await pool.query(
       `INSERT INTO ads (user_id, category_id, title, description, price, condition, photo_url, location)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING 
-         id, title, description, price, condition, created_at, photo_url, user_id, location`,
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
       [userId, categoryId, title, description, parseFloat(price), condition, photoUrlJson, location || null]
     )
 
+    const adId = insertResult.rows[0].id;
+
+    // Теперь получаем полную информацию об объявлении с названием категории
+    const adResult = await pool.query(`
+      SELECT 
+        a.id, a.title, a.description, a.price, a.condition, a.created_at, a.photo_url, a.user_id, a.location,
+        c.name AS category_name
+      FROM ads a
+      LEFT JOIN categories c ON a.category_id = c.id
+      WHERE a.id = $1
+    `, [adId]);
+
     // Парсим photo_url обратно в массив для ответа
-    const ad = result.rows[0]
+    const ad = adResult.rows[0];
     if (ad.photo_url) {
       try {
         ad.photo_urls = JSON.parse(ad.photo_url)
