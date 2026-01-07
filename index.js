@@ -2,9 +2,8 @@ const express = require('express')
 const cors = require('cors')
 const bodyParser = require('body-parser')
 const { Pool } = require('pg')
-const bcrypt = require('bcryptjs')
-const jwt = require('jsonwebtoken')
 const multer = require('multer')
+const { validate } = require('@telegram-apps/init-data-node');
 require('dotenv').config()
 
 const app = express()
@@ -12,9 +11,9 @@ const app = express()
 app.use(cors({
   origin: [
     'http://localhost:5173',
-    'https://spacego-frontend.vercel.app', // Убраны лишние пробелы
-    'https://web.telegram.org', // Убраны лишние пробелы
-    'https://t.me' // Убраны лишние пробелы
+    'https://spacego-frontend.vercel.app',
+    'https://web.telegram.org',
+    'https://t.me'
   ],
   credentials: true
 }))
@@ -62,53 +61,144 @@ function processImage(buffer, mimeType) {
   }
 }
 
-// === ЭНДПОИНТЫ ===
-
-// Регистрация
-app.post('/api/register', async (req, res) => {
-  const { email, password } = req.body
-  if (!email || !password) {
-    return res.status(400).json({ error: 'Email и пароль обязательны' })
+// Middleware для проверки Telegram WebApp данных
+const telegramAuthMiddleware = (req, res, next) => {
+  const initData = req.headers['telegram-init-data'] || req.query.initData;
+  
+  if (!initData) {
+    return res.status(401).json({ error: 'Требуется авторизация через Telegram' });
   }
+
   try {
-    const hashedPassword = await bcrypt.hash(password, 10)
+    // Проверяем подпись initData с использованием нового пакета
+    const isValid = validate(initData, process.env.BOT_TOKEN);
+    
+    if (!isValid) {
+      return res.status(401).json({ error: 'Неверные данные авторизации' });
+    }
+
+    // Парсим initData для получения user данных
+    const params = new URLSearchParams(initData);
+    const userStr = params.get('user');
+    
+    if (!userStr) {
+      return res.status(401).json({ error: 'Данные пользователя не найдены' });
+    }
+
+    const userData = JSON.parse(userStr);
+    req.telegramUser = userData;
+    req.authDate = parseInt(params.get('auth_date'));
+    
+    next();
+  } catch (error) {
+    console.error('Ошибка проверки Telegram auth:', error);
+    res.status(401).json({ error: 'Ошибка авторизации' });
+  }
+};
+
+// ========== ЭНДПОИНТЫ ==========
+
+// Telegram авторизация
+app.post('/api/telegram-auth', telegramAuthMiddleware, async (req, res) => {
+  try {
+    const { telegramUser, authDate } = req;
+    
+    // Проверяем, есть ли пользователь в БД
+    let user = await pool.query(
+      'SELECT * FROM users WHERE telegram_id = $1',
+      [telegramUser.id]
+    );
+
+    if (user.rows.length === 0) {
+      // Создаём нового пользователя
+      const result = await pool.query(
+        `INSERT INTO users 
+         (telegram_id, username, first_name, last_name, language_code, is_premium, photo_url, auth_date) 
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) 
+         RETURNING id, telegram_id, username, first_name, last_name, language_code, is_premium, photo_url, created_at`,
+        [
+          telegramUser.id,
+          telegramUser.username || null,
+          telegramUser.first_name,
+          telegramUser.last_name || null,
+          telegramUser.language_code || 'ru',
+          telegramUser.is_premium || false,
+          telegramUser.photo_url || null,
+          new Date(authDate * 1000) // конвертируем секунды в Date
+        ]
+      );
+      
+      user = result.rows[0];
+    } else {
+      // Обновляем время последней авторизации
+      await pool.query(
+        'UPDATE users SET auth_date = $1 WHERE telegram_id = $2',
+        [new Date(authDate * 1000), telegramUser.id]
+      );
+      
+      user = user.rows[0];
+    }
+
+    res.json({
+      success: true,
+      user: {
+        id: user.id,
+        telegram_id: user.telegram_id,
+        username: user.username,
+        first_name: user.first_name,
+        last_name: user.last_name,
+        photo_url: user.photo_url,
+        created_at: user.created_at
+      }
+    });
+  } catch (error) {
+    console.error('Ошибка Telegram авторизации:', error);
+    res.status(500).json({ error: 'Ошибка сервера' });
+  }
+});
+
+// Получение информации о текущем пользователе
+app.get('/api/user', telegramAuthMiddleware, async (req, res) => {
+  try {
+    const { telegramUser } = req;
+    
     const result = await pool.query(
-      'INSERT INTO users (email, password) VALUES ($1, $2) RETURNING id, email',
-      [email, hashedPassword]
-    )
-    res.json({ success: true, user: result.rows[0] })
-  } catch (err) {
-    if (err.code === '23505') {
-      return res.status(400).json({ error: 'Пользователь с таким email уже существует' })
-    }
-    console.error(err)
-    res.status(500).json({ error: 'Ошибка регистрации' })
-  }
-})
-
-// Авторизация
-app.post('/api/login', async (req, res) => {
-  const { email, password } = req.body
-  if (!email || !password) {
-    return res.status(400).json({ error: 'Email и пароль обязательны' })
-  }
-  try {
-    const result = await pool.query('SELECT * FROM users WHERE email = $1', [email])
+      'SELECT id, telegram_id, username, first_name, last_name, photo_url, created_at FROM users WHERE telegram_id = $1',
+      [telegramUser.id]
+    );
+    
     if (result.rows.length === 0) {
-      return res.status(401).json({ error: 'Неверный email или пароль' })
+      return res.status(404).json({ error: 'Пользователь не найден' });
     }
-    const user = result.rows[0]
-    const isMatch = await bcrypt.compare(password, user.password)
-    if (!isMatch) {
-      return res.status(401).json({ error: 'Неверный email или пароль' })
-    }
-    const token = jwt.sign({ userId: user.id }, process.env.JWT_SECRET || 'secret', { expiresIn: '7d' })
-    res.json({ success: true, token, user: { id: user.id, email: user.email } })
+
+    res.json({ success: true, user: result.rows[0] });
   } catch (err) {
-    console.error(err)
-    res.status(500).json({ error: 'Ошибка авторизации' })
+    console.error(err);
+    res.status(500).json({ error: 'Ошибка загрузки профиля' });
   }
-})
+});
+
+// Получение информации о пользователе по ID (публичный доступ)
+app.get('/api/user/:userId', async (req, res) => {
+  const { userId } = req.params;
+
+  try {
+    const result = await pool.query(
+      'SELECT id, telegram_id, username, first_name, last_name, photo_url, created_at FROM users WHERE id = $1',
+      [userId]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Пользователь не найден' });
+    }
+
+    const user = result.rows[0];
+    res.json({ success: true, user });
+  } catch (err) {
+    console.error('Ошибка загрузки пользователя:', err);
+    res.status(500).json({ error: 'Ошибка загрузки данных пользователя' });
+  }
+});
 
 // Получение корневых категорий
 app.get('/api/categories', async (req, res) => {
@@ -138,13 +228,13 @@ app.get('/api/categories/:parentId', async (req, res) => {
   }
 });
 
+// Получение объявлений с фильтрами
 app.get('/api/ads', async (req, res) => {
   const {
     category_id,
     min_price,
     max_price,
     location,
-    // Существующие фильтры
     rooms,
     total_area_min,
     total_area_max,
@@ -156,7 +246,6 @@ app.get('/api/ads', async (req, res) => {
     condition_detail,
     furniture,
     transaction_type,
-    // Новые фильтры
     plot_area_min,
     plot_area_max,
     land_category,
@@ -647,18 +736,23 @@ app.get('/api/ads', async (req, res) => {
 });
 
 // Создание объявления
-app.post('/api/ads', upload.array('photos', 10), async (req, res) => {
+app.post('/api/ads', telegramAuthMiddleware, upload.array('photos', 10), async (req, res) => {
   const { title, description, price, categoryId, condition, location, propertyDetails } = req.body;
-  const authHeader = req.headers.authorization;
-
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ error: 'Требуется авторизация' })
-  }
-
-  const token = authHeader.split(' ')[1]
+  
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret')
-    const userId = decoded.userId
+    const { telegramUser } = req;
+    
+    // Получаем ID пользователя из БД
+    const userResult = await pool.query(
+      'SELECT id FROM users WHERE telegram_id = $1',
+      [telegramUser.id]
+    );
+    
+    if (userResult.rows.length === 0) {
+      return res.status(401).json({ error: 'Пользователь не найден' });
+    }
+    
+    const userId = userResult.rows[0].id;
 
     if (!title || !description || !price || !categoryId || !condition) {
       return res.status(400).json({ error: 'Все поля обязательны' })
@@ -744,71 +838,21 @@ app.post('/api/ads', upload.array('photos', 10), async (req, res) => {
   }
 })
 
-// Получение информации о текущем пользователе
-app.get('/api/user', async (req, res) => {
-  const authHeader = req.headers.authorization
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ error: 'Требуется авторизация' })
-  }
-
-  const token = authHeader.split(' ')[1]
+// Получение объявлений текущего пользователя
+app.get('/api/my-ads', telegramAuthMiddleware, async (req, res) => {
   try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret')
-    const userId = decoded.userId
-
-    const result = await pool.query('SELECT id, email, created_at FROM users WHERE id = $1', [userId])
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Пользователь не найден' })
-    }
-
-    res.json({ success: true, user: result.rows[0] })
-  } catch (err) {
-    console.error(err)
-    res.status(500).json({ error: 'Ошибка загрузки профиля' })
-  }
-})
-
-// Получение информации о пользователе по ID
-app.get('/api/user/:userId', async (req, res) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ error: 'Требуется авторизация' });
-  }
-
-  const token = authHeader.split(' ')[1];
-  const { userId } = req.params;
-
-  try {
-    jwt.verify(token, process.env.JWT_SECRET || 'secret');
-
-    const result = await pool.query(
-      'SELECT id, email, created_at FROM users WHERE id = $1',
-      [userId]
+    const { telegramUser } = req;
+    
+    const userResult = await pool.query(
+      'SELECT id FROM users WHERE telegram_id = $1',
+      [telegramUser.id]
     );
-
-    if (result.rows.length === 0) {
-      return res.status(404).json({ error: 'Пользователь не найден' });
+    
+    if (userResult.rows.length === 0) {
+      return res.status(401).json({ error: 'Пользователь не найден' });
     }
-
-    const user = result.rows[0];
-    res.json({ success: true, user });
-  } catch (err) {
-    console.error('Ошибка загрузки пользователя:', err);
-    res.status(500).json({ error: 'Ошибка загрузки данных пользователя' });
-  }
-});
-
-// Получение объявлений текущего пользователя (НОВЫЙ ЭНДПОИНТ)
-app.get('/api/my-ads', async (req, res) => {
-  const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
-    return res.status(401).json({ error: 'Требуется авторизация' });
-  }
-
-  const token = authHeader.split(' ')[1];
-  try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'secret');
-    const userId = decoded.userId;
+    
+    const userId = userResult.rows[0].id;
 
     const result = await pool.query(`
       SELECT
@@ -854,7 +898,6 @@ app.get('/api/my-ads', async (req, res) => {
   }
 });
 
-
 // Обработчик ошибок multer
 app.use((error, req, res, next) => {
   if (error instanceof multer.MulterError) {
@@ -876,4 +919,5 @@ app.listen(PORT, () => {
   console.log(`🚀 Сервер запущен на порту ${PORT}`)
   console.log(`📸 Модуль работы с фото активирован (базовая версия)`)
   console.log(`✅ Health check доступен по /health`)
+  console.log(`🤖 Telegram WebApp авторизация активирована`)
 })
