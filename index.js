@@ -337,11 +337,18 @@ app.get('/api/ads', async (req, res) => {
   try {
     let query = `
       SELECT
-        a.id, a.title, a.description, a.price, a.condition, a.created_at, a.photo_url, a.user_id, a.location, a.property_details,
-        c.name AS category_name
-      FROM ads a
-      LEFT JOIN categories c ON a.category_id = c.id
-      WHERE 1=1
+    a.id, a.title, a.description, a.price, a.condition, a.created_at, 
+    a.photo_url, a.user_id, a.location, a.property_details,
+    c.name AS category_name,
+    u.username AS user_username,
+    u.first_name AS user_first_name,
+    u.last_name AS user_last_name,
+    u.photo_url AS user_photo_url,
+    u.telegram_id AS user_telegram_id
+  FROM ads a
+  LEFT JOIN categories c ON a.category_id = c.id
+  LEFT JOIN users u ON a.user_id = u.id  -- Добавили JOIN с users
+  WHERE 1=1
     `;
     let params = [];
     let paramIndex = 1;
