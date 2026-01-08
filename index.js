@@ -13,7 +13,8 @@ app.use(cors({
     'http://localhost:5173',
     'https://spacego-frontend.vercel.app',
     'https://web.telegram.org',
-    'https://t.me'
+    'https://t.me',
+    'https://telegram.org'
   ],
   credentials: true
 }))
@@ -99,6 +100,24 @@ const telegramAuthMiddleware = (req, res, next) => {
 // ========== ЭНДПОИНТЫ ==========
 
 // Telegram авторизация
+
+// Эндпоинт для получения логов с фронтенда
+app.post('/api/log', (req, res) => {
+  const { level, message, data } = req.body;
+  
+  const logMessage = `[FRONTEND ${level.toUpperCase()}] ${message}`;
+  
+  if (level === 'error') {
+    console.error(logMessage, data);
+  } else if (level === 'warn') {
+    console.warn(logMessage, data);
+  } else {
+    console.log(logMessage, data);
+  }
+  
+  res.json({ success: true });
+});
+
 app.post('/api/telegram-auth', telegramAuthMiddleware, async (req, res) => {
   try {
     const { telegramUser, authDate } = req;
