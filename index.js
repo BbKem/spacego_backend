@@ -62,60 +62,39 @@ function processImage(buffer, mimeType) {
   }
 }
 
-// Middleware для проверки Telegram WebApp данных
-// backend/index.js - временно изменяем middleware
+// backend/index.js - верните нормальную проверку
 const telegramAuthMiddleware = (req, res, next) => {
   const initData = req.headers['telegram-init-data'] || req.query.initData;
-  
-  console.log('Received initData:', initData?.substring(0, 100) + '...');
   
   if (!initData) {
     return res.status(401).json({ error: 'Требуется авторизация через Telegram' });
   }
 
   try {
-    // ВРЕМЕННО: пропускаем проверку подписи для тестирования
-    console.log('⚠️ TEMPORARY: Skipping Telegram signature validation');
+    // ВКЛЮЧИТЕ проверку подписи
+    const isValid = validate(initData, process.env.BOT_TOKEN);
     
-    // Пытаемся извлечь user из initData строки
-    // initData выглядит как: "user=...&auth_date=..."
+    if (!isValid) {
+      console.error('Invalid Telegram signature');
+      return res.status(401).json({ error: 'Неверные данные авторизации' });
+    }
+
+    // Парсим initData
     const params = new URLSearchParams(initData);
     const userStr = params.get('user');
     
     if (!userStr) {
-      console.log('No user in initData, using test user');
-      // Тестовый пользователь для разработки
-      req.telegramUser = {
-        id: 972239922,
-        first_name: 'Камиль',
-        username: 'kem_RT',
-        language_code: 'ru',
-        photo_url: 'https://t.me/i/userpic/320/m1XboFZL57c3VOu41uxkLnqshBk-iuyce8SjBtU1Ynk.svg'
-      };
-      req.authDate = Math.floor(Date.now() / 1000);
-    } else {
-      try {
-        const userData = JSON.parse(decodeURIComponent(userStr));
-        console.log('Parsed user data:', userData);
-        req.telegramUser = userData;
-        req.authDate = parseInt(params.get('auth_date'));
-      } catch (parseError) {
-        console.error('Error parsing user data:', parseError);
-        // Fallback to test user
-        req.telegramUser = {
-          id: 972239922,
-          first_name: 'Камиль',
-          username: 'kem_RT'
-        };
-        req.authDate = Math.floor(Date.now() / 1000);
-      }
+      return res.status(401).json({ error: 'Данные пользователя не найдены' });
     }
+
+    const userData = JSON.parse(decodeURIComponent(userStr));
+    req.telegramUser = userData;
+    req.authDate = parseInt(params.get('auth_date'));
     
-    console.log('Using telegramUser:', req.telegramUser);
     next();
   } catch (error) {
-    console.error('Error in telegram auth middleware:', error);
-    res.status(401).json({ error: 'Ошибка авторизации' });
+    console.error('Ошибка проверки Telegram auth:', error);
+    res.status(500).json({ error: 'Ошибка сервера' });
   }
 };
 
