@@ -66,34 +66,81 @@ function processImage(buffer, mimeType) {
 const telegramAuthMiddleware = (req, res, next) => {
   const initData = req.headers['telegram-init-data'] || req.query.initData;
   
+  console.log('=== TELEGRAM AUTH DEBUG ===');
+  console.log('initData received (first 200 chars):', initData?.substring(0, 200));
+  console.log('initData length:', initData?.length);
+  
   if (!initData) {
+    console.log('No initData provided');
     return res.status(401).json({ error: 'Требуется авторизация через Telegram' });
   }
 
   try {
-    // ВКЛЮЧИТЕ проверку подписи
-    const isValid = validate(initData, process.env.BOT_TOKEN);
+    // ВРЕМЕННО: добавляем больше отладки
+    console.log('BOT_TOKEN exists:', !!process.env.BOT_TOKEN);
+    console.log('BOT_TOKEN first 10 chars:', process.env.BOT_TOKEN?.substring(0, 10) + '...');
     
-    if (!isValid) {
-      console.error('Invalid Telegram signature');
-      return res.status(401).json({ error: 'Неверные данные авторизации' });
+    try {
+      const isValid = validate(initData, process.env.BOT_TOKEN);
+      console.log('Validation result:', isValid);
+      
+      if (!isValid) {
+        console.error('Invalid Telegram signature');
+        console.log('initData that failed:', initData);
+        return res.status(401).json({ error: 'Неверные данные авторизации' });
+      }
+    } catch (validationError) {
+      console.error('Validation error:', validationError);
+      console.error('initData causing error:', initData);
+      return res.status(401).json({ error: 'Ошибка проверки подписи' });
     }
 
     // Парсим initData
+    console.log('Parsing initData...');
     const params = new URLSearchParams(initData);
+    
+    // Логируем все параметры для отладки
+    console.log('All params from initData:');
+    for (const [key, value] of params.entries()) {
+      console.log(`  ${key}: ${value?.substring(0, 50)}...`);
+    }
+    
     const userStr = params.get('user');
+    console.log('userStr raw:', userStr?.substring(0, 100));
     
     if (!userStr) {
+      console.log('No user param in initData');
       return res.status(401).json({ error: 'Данные пользователя не найдены' });
     }
 
-    const userData = JSON.parse(decodeURIComponent(userStr));
+    // Декодируем - может быть двойное кодирование
+    let decodedUserStr = userStr;
+    try {
+      // Пробуем декодировать один раз
+      decodedUserStr = decodeURIComponent(userStr);
+      console.log('After first decode:', decodedUserStr?.substring(0, 100));
+      
+      // Если всё ещё выглядит как закодированный JSON, декодируем ещё раз
+      if (decodedUserStr.includes('%22') || decodedUserStr.includes('%7B')) {
+        decodedUserStr = decodeURIComponent(decodedUserStr);
+        console.log('After second decode:', decodedUserStr?.substring(0, 100));
+      }
+    } catch (decodeError) {
+      console.error('Error decoding userStr:', decodeError);
+      // Используем как есть
+    }
+    
+    console.log('Final decoded userStr:', decodedUserStr);
+    
+    const userData = JSON.parse(decodedUserStr);
     req.telegramUser = userData;
     req.authDate = parseInt(params.get('auth_date'));
     
+    console.log('Successfully parsed user:', userData);
     next();
   } catch (error) {
-    console.error('Ошибка проверки Telegram auth:', error);
+    console.error('Error in telegram auth middleware:', error);
+    console.error('Error stack:', error.stack);
     res.status(500).json({ error: 'Ошибка сервера' });
   }
 };
