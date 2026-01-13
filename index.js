@@ -62,6 +62,44 @@ function processImage(buffer, mimeType) {
   }
 }
 
+// Функция для проверки подписи Telegram WebApp
+const validateTelegramWebAppData = (token, initData) => {
+  try {
+    const crypto = require('crypto');
+    
+    // Парсим initData
+    const params = new URLSearchParams(initData);
+    
+    // Извлекаем hash и удаляем его из параметров
+    const hash = params.get('hash');
+    params.delete('hash');
+    
+    // Сортируем параметры по алфавиту
+    const sortedParams = Array.from(params.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, value]) => `${key}=${value}`)
+      .join('\n');
+    
+    // Создаём секретный ключ
+    const secretKey = crypto.createHmac('sha256', 'WebAppData')
+      .update(token)
+      .digest();
+    
+    // Вычисляем хэш
+    const calculatedHash = crypto.createHmac('sha256', secretKey)
+      .update(sortedParams)
+      .digest('hex');
+    
+    return calculatedHash === hash;
+  } catch (error) {
+    console.error('Error validating Telegram data:', error);
+    return false;
+  }
+};
+
+// И в middleware используйте:
+const isValid = validateTelegramWebAppData(process.env.BOT_TOKEN, initData);
+
 // backend/index.js - верните нормальную проверку
 const telegramAuthMiddleware = (req, res, next) => {
   const initData = req.headers['telegram-init-data'] || req.query.initData;
