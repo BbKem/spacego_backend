@@ -226,6 +226,134 @@ app.get('/api/user/:userId', async (req, res) => {
   }
 });
 
+// backend/index.js добавляем:
+
+// Добавить/удалить из избранного
+app.post('/api/favorites/:adId', telegramAuthMiddleware, async (req, res) => {
+  try {
+    const { telegramUser } = req;
+    const { adId } = req.params;
+    
+    const userResult = await pool.query('SELECT id FROM users WHERE telegram_id = $1', [telegramUser.id]);
+    if (userResult.rows.length === 0) {
+      return res.status(401).json({ error: 'Пользователь не найден' });
+    }
+    
+    const userId = userResult.rows[0].id;
+    
+    // Проверяем, есть ли уже в избранном
+    const existing = await pool.query(
+      'SELECT id FROM favorites WHERE user_id = $1 AND ad_id = $2',
+      [userId, adId]
+    );
+    
+    if (existing.rows.length > 0) {
+      // Удаляем из избранного
+      await pool.query('DELETE FROM favorites WHERE user_id = $1 AND ad_id = $2', [userId, adId]);
+      res.json({ success: true, action: 'removed' });
+    } else {
+      // Добавляем в избранное
+      await pool.query(
+        'INSERT INTO favorites (user_id, ad_id) VALUES ($1, $2)',
+        [userId, adId]
+      );
+      res.json({ success: true, action: 'added' });
+    }
+  } catch (error) {
+    console.error('Ошибка избранного:', error);
+    res.status(500).json({ error: 'Ошибка сервера' });
+  }
+});
+
+// Получить избранные объявления пользователя
+app.get('/api/favorites', telegramAuthMiddleware, async (req, res) => {
+  try {
+    const { telegramUser } = req;
+    
+    const userResult = await pool.query('SELECT id FROM users WHERE telegram_id = $1', [telegramUser.id]);
+    if (userResult.rows.length === 0) {
+      return res.status(401).json({ error: 'Пользователь не найден' });
+    }
+    
+    const userId = userResult.rows[0].id;
+    
+    const result = await pool.query(`
+      SELECT 
+        a.id, a.title, a.description, a.price, a.condition, a.created_at, 
+        a.photo_url, a.user_id, a.location, a.property_details,
+        c.name AS category_name,
+        u.username AS user_username,
+        u.first_name AS user_first_name,
+        u.last_name AS user_last_name,
+        u.photo_url AS user_photo_url,
+        u.telegram_id AS user_telegram_id
+      FROM ads a
+      JOIN favorites f ON a.id = f.ad_id
+      LEFT JOIN categories c ON a.category_id = c.id
+      LEFT JOIN users u ON a.user_id = u.id
+      WHERE f.user_id = $1
+      ORDER BY f.created_at DESC
+    `, [userId]);
+
+    const ads = result.rows.map(ad => {
+      // Парсим photo_url как в других местах
+      if (ad.photo_url) {
+        try {
+          ad.photo_urls = JSON.parse(ad.photo_url);
+        } catch (e) {
+          console.error("Ошибка парсинга photo_url:", e);
+          ad.photo_urls = [];
+        }
+        delete ad.photo_url;
+      } else {
+        ad.photo_urls = [];
+      }
+
+      if (ad.property_details) {
+        try {
+          // Уже парсится на бэкенде
+        } catch (e) {
+          console.error("Ошибка парсинга property_details:", e);
+          ad.property_details = {};
+        }
+      } else {
+        ad.property_details = {};
+      }
+      return ad;
+    });
+
+    res.json(ads);
+  } catch (error) {
+    console.error('Ошибка загрузки избранного:', error);
+    res.status(500).json({ error: 'Ошибка сервера' });
+  }
+});
+
+// Проверить, добавлено ли в избранное
+app.get('/api/favorites/:adId/check', telegramAuthMiddleware, async (req, res) => {
+  try {
+    const { telegramUser } = req;
+    const { adId } = req.params;
+    
+    const userResult = await pool.query('SELECT id FROM users WHERE telegram_id = $1', [telegramUser.id]);
+    if (userResult.rows.length === 0) {
+      return res.status(401).json({ error: 'Пользователь не найден' });
+    }
+    
+    const userId = userResult.rows[0].id;
+    
+    const result = await pool.query(
+      'SELECT id FROM favorites WHERE user_id = $1 AND ad_id = $2',
+      [userId, adId]
+    );
+    
+    res.json({ isFavorite: result.rows.length > 0 });
+  } catch (error) {
+    console.error('Ошибка проверки избранного:', error);
+    res.status(500).json({ error: 'Ошибка сервера' });
+  }
+});
+
 // Получение корневых категорий
 app.get('/api/categories', async (req, res) => {
   try {
