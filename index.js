@@ -481,8 +481,8 @@ app.get('/api/ads', async (req, res) => {
     u.telegram_id AS user_telegram_id
   FROM ads a
   LEFT JOIN categories c ON a.category_id = c.id
-  LEFT JOIN users u ON a.user_id = u.id  -- Добавили JOIN с users
-  WHERE 1=1
+  LEFT JOIN users u ON a.user_id = u.id
+  WHERE (a.is_archived = false OR a.is_archived IS NULL) 
     `;
     let params = [];
     let paramIndex = 1;
@@ -1288,14 +1288,16 @@ app.get('/api/my-ads', telegramAuthMiddleware, async (req, res) => {
     const userId = userResult.rows[0].id;
 
     const result = await pool.query(`
-      SELECT
-        a.id, a.title, a.description, a.price, a.condition, a.created_at, a.photo_url, a.user_id, a.location, a.property_details,
-        c.name AS category_name
-      FROM ads a
-      LEFT JOIN categories c ON a.category_id = c.id
-      WHERE a.user_id = $1
-      ORDER BY a.created_at DESC
-    `, [userId]);
+  SELECT
+    a.id, a.title, a.description, a.price, a.condition, a.created_at, 
+    a.photo_url, a.user_id, a.location, a.property_details,
+    a.is_archived, 
+    c.name AS category_name
+  FROM ads a
+  LEFT JOIN categories c ON a.category_id = c.id
+  WHERE a.user_id = $1  
+  ORDER BY a.created_at DESC
+`, [userId]);
 
     const ads = result.rows.map(ad => {
       if (ad.photo_url) {
@@ -1328,6 +1330,49 @@ app.get('/api/my-ads', telegramAuthMiddleware, async (req, res) => {
   } catch (err) {
     console.error('Ошибка загрузки моих объявлений:', err);
     res.status(500).json({ error: 'Ошибка загрузки моих объявлений' });
+  }
+});
+
+// Полное удаление объявления
+app.delete('/api/ads/:id', telegramAuthMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { telegramUser } = req;
+    
+    const userResult = await pool.query(
+      'SELECT id FROM users WHERE telegram_id = $1',
+      [telegramUser.id]
+    );
+    
+    if (userResult.rows.length === 0) {
+      return res.status(401).json({ error: 'Пользователь не найден' });
+    }
+    
+    const userId = userResult.rows[0].id;
+    
+    const adResult = await pool.query(
+      'SELECT user_id FROM ads WHERE id = $1',
+      [id]
+    );
+    
+    if (adResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Объявление не найдено' });
+    }
+    
+    if (adResult.rows[0].user_id !== userId) {
+      return res.status(403).json({ error: 'Недостаточно прав' });
+    }
+    
+    // Удаляем из избранного
+    await pool.query('DELETE FROM favorites WHERE ad_id = $1', [id]);
+    
+    // Удаляем объявление
+    await pool.query('DELETE FROM ads WHERE id = $1', [id]);
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Ошибка удаления:', error);
+    res.status(500).json({ error: 'Ошибка сервера' });
   }
 });
 
