@@ -896,6 +896,278 @@ app.get('/api/ads', async (req, res) => {
   }
 });
 
+// Архивировать/удалить объявление (мягкое удаление)
+app.post('/api/ads/:id/archive', telegramAuthMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { telegramUser } = req;
+    
+    // Получаем ID пользователя
+    const userResult = await pool.query(
+      'SELECT id FROM users WHERE telegram_id = $1',
+      [telegramUser.id]
+    );
+    
+    if (userResult.rows.length === 0) {
+      return res.status(401).json({ error: 'Пользователь не найден' });
+    }
+    
+    const userId = userResult.rows[0].id;
+    
+    // Проверяем, что пользователь является владельцем объявления
+    const adResult = await pool.query(
+      'SELECT user_id FROM ads WHERE id = $1',
+      [id]
+    );
+    
+    if (adResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Объявление не найдено' });
+    }
+    
+    if (adResult.rows[0].user_id !== userId) {
+      return res.status(403).json({ error: 'Недостаточно прав' });
+    }
+    
+    // Архивируем объявление (мягкое удаление)
+    await pool.query(
+      'UPDATE ads SET is_archived = true, archived_at = NOW() WHERE id = $1',
+      [id]
+    );
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Ошибка архивирования:', error);
+    res.status(500).json({ error: 'Ошибка сервера' });
+  }
+});
+
+// Восстановить из архива
+app.post('/api/ads/:id/restore', telegramAuthMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { telegramUser } = req;
+    
+    const userResult = await pool.query(
+      'SELECT id FROM users WHERE telegram_id = $1',
+      [telegramUser.id]
+    );
+    
+    const userId = userResult.rows[0].id;
+    
+    const adResult = await pool.query(
+      'SELECT user_id FROM ads WHERE id = $1',
+      [id]
+    );
+    
+    if (adResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Объявление не найдено' });
+    }
+    
+    if (adResult.rows[0].user_id !== userId) {
+      return res.status(403).json({ error: 'Недостаточно прав' });
+    }
+    
+    await pool.query(
+      'UPDATE ads SET is_archived = false, archived_at = NULL WHERE id = $1',
+      [id]
+    );
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.error('Ошибка восстановления:', error);
+    res.status(500).json({ error: 'Ошибка сервера' });
+  }
+});
+
+// Получить объявление для редактирования
+app.get('/api/ads/:id/edit', telegramAuthMiddleware, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { telegramUser } = req;
+    
+    const userResult = await pool.query(
+      'SELECT id FROM users WHERE telegram_id = $1',
+      [telegramUser.id]
+    );
+    
+    const userId = userResult.rows[0].id;
+    
+    const adResult = await pool.query(`
+      SELECT
+        a.id, a.title, a.description, a.price, a.condition, 
+        a.category_id, a.location, a.property_details,
+        c.name AS category_name,
+        c2.name AS parent_category_name
+      FROM ads a
+      LEFT JOIN categories c ON a.category_id = c.id
+      LEFT JOIN categories c2 ON c.parent_id = c2.id
+      WHERE a.id = $1 AND a.user_id = $2
+    `, [id, userId]);
+    
+    if (adResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Объявление не найдено или нет прав' });
+    }
+    
+    const ad = adResult.rows[0];
+    
+    if (ad.property_details && typeof ad.property_details === 'string') {
+      try {
+        ad.property_details = JSON.parse(ad.property_details);
+      } catch (e) {
+        console.error("Ошибка парсинга property_details:", e);
+        ad.property_details = {};
+      }
+    }
+    
+    res.json({ success: true, ad });
+  } catch (error) {
+    console.error('Ошибка загрузки объявления для редактирования:', error);
+    res.status(500).json({ error: 'Ошибка сервера' });
+  }
+});
+
+// Обновить объявление
+app.put('/api/ads/:id', telegramAuthMiddleware, upload.array('photos', 10), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { telegramUser } = req;
+    const { title, description, price, categoryId, condition, location, propertyDetails } = req.body;
+    
+    // Получаем ID пользователя
+    const userResult = await pool.query(
+      'SELECT id FROM users WHERE telegram_id = $1',
+      [telegramUser.id]
+    );
+    
+    if (userResult.rows.length === 0) {
+      return res.status(401).json({ error: 'Пользователь не найден' });
+    }
+    
+    const userId = userResult.rows[0].id;
+    
+    // Проверяем права
+    const adResult = await pool.query(
+      'SELECT id, user_id FROM ads WHERE id = $1',
+      [id]
+    );
+    
+    if (adResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Объявление не найдено' });
+    }
+    
+    if (adResult.rows[0].user_id !== userId) {
+      return res.status(403).json({ error: 'Недостаточно прав' });
+    }
+    
+    // Валидация
+    if (!title || !description || !price || !categoryId || !condition) {
+      return res.status(400).json({ error: 'Все поля обязательны' });
+    }
+    
+    let parsedPropertyDetails = null;
+    if (propertyDetails) {
+      if (typeof propertyDetails === 'string') {
+        try {
+          parsedPropertyDetails = JSON.parse(propertyDetails);
+        } catch (e) {
+          return res.status(400).json({ error: 'Некорректный формат propertyDetails' });
+        }
+      } else if (typeof propertyDetails === 'object') {
+        parsedPropertyDetails = propertyDetails;
+      } else {
+        return res.status(400).json({ error: 'Некорректный формат propertyDetails' });
+      }
+    }
+    
+    let photoUrls = null;
+    
+    // Если есть новые фото, обрабатываем их
+    if (req.files && req.files.length > 0) {
+      photoUrls = [];
+      for (let i = 0; i < Math.min(req.files.length, 10); i++) {
+        const file = req.files[i];
+        try {
+          const processedImage = processImage(file.buffer, file.mimetype);
+          photoUrls.push(processedImage.dataUrl);
+          console.log(`✅ Фото ${i + 1} обработано: ${Math.round(processedImage.size / 1024)}KB`);
+        } catch (err) {
+          console.error(`Ошибка обработки фото ${i + 1}:`, err.message);
+          return res.status(400).json({ error: `Ошибка фото ${i + 1}: ${err.message}` });
+        }
+      }
+    }
+    
+    // Подготавливаем данные для обновления
+    const updateFields = {
+      title,
+      description,
+      price: parseFloat(price),
+      category_id: categoryId,
+      condition,
+      location: location || null,
+      property_details: JSON.stringify(parsedPropertyDetails),
+      updated_at: new Date()
+    };
+    
+    // Если есть новые фото, обновляем их
+    if (photoUrls) {
+      updateFields.photo_url = JSON.stringify(photoUrls);
+    }
+    
+    // Формируем SQL запрос
+    const setClause = Object.keys(updateFields)
+      .map((key, index) => `${key} = $${index + 2}`)
+      .join(', ');
+    
+    const values = [id, ...Object.values(updateFields)];
+    
+    await pool.query(
+      `UPDATE ads SET ${setClause} WHERE id = $1`,
+      values
+    );
+    
+    // Получаем обновленное объявление
+    const updatedAdResult = await pool.query(`
+      SELECT
+        a.id, a.title, a.description, a.price, a.condition, a.created_at, a.updated_at,
+        a.photo_url, a.user_id, a.location, a.property_details,
+        c.name AS category_name
+      FROM ads a
+      LEFT JOIN categories c ON a.category_id = c.id
+      WHERE a.id = $1
+    `, [id]);
+    
+    const updatedAd = updatedAdResult.rows[0];
+    
+    if (updatedAd.photo_url) {
+      try {
+        updatedAd.photo_urls = JSON.parse(updatedAd.photo_url);
+        delete updatedAd.photo_url;
+      } catch (e) {
+        updatedAd.photo_urls = [];
+      }
+    } else {
+      updatedAd.photo_urls = [];
+    }
+    
+    if (updatedAd.property_details) {
+      try {
+        // Уже парсится на бэкенде
+      } catch (e) {
+        console.error("Ошибка парсинга property_details:", e);
+        updatedAd.property_details = {};
+      }
+    } else {
+      updatedAd.property_details = {};
+    }
+    
+    res.json({ success: true, ad: updatedAd });
+  } catch (error) {
+    console.error('Ошибка обновления объявления:', error);
+    res.status(500).json({ error: 'Ошибка сервера' });
+  }
+});
+
 // Создание объявления
 app.post('/api/ads', telegramAuthMiddleware, upload.array('photos', 10), async (req, res) => {
   const { title, description, price, categoryId, condition, location, propertyDetails } = req.body;
