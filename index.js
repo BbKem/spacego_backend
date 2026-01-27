@@ -239,6 +239,28 @@ app.get('/api/user', telegramAuthMiddleware, async (req, res) => {
   }
 });
 
+// Получить список пользователей (только для админов)
+app.get('/api/admin/users',
+  telegramAuthMiddleware,
+  checkRole('admin'),
+  async (req, res) => {
+    try {
+      const result = await pool.query(`
+        SELECT 
+          id, telegram_id, username, first_name, last_name, 
+          photo_url, role, created_at
+        FROM users
+        ORDER BY created_at DESC
+      `);
+      
+      res.json(result.rows);
+    } catch (error) {
+      console.error('Ошибка загрузки пользователей:', error);
+      res.status(500).json({ error: 'Ошибка сервера' });
+    }
+  }
+);
+
 // Получение информации о пользователе по ID (публичный доступ)
 app.get('/api/user/:userId', async (req, res) => {
   const { userId } = req.params;
