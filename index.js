@@ -104,6 +104,41 @@ const telegramAuthMiddleware = (req, res, next) => {
     res.status(500).json({ error: 'Ошибка сервера' });
   }
 };
+
+// Middleware для проверки ролей
+const checkRole = (requiredRole) => {
+  return async (req, res, next) => {
+    try {
+      // Получаем роль пользователя из БД
+      const userResult = await pool.query(
+        'SELECT role FROM users WHERE telegram_id = $1',
+        [req.telegramUser.id]
+      );
+
+      if (userResult.rows.length === 0) {
+        return res.status(404).json({ error: 'Пользователь не найден' });
+      }
+
+      const userRole = userResult.rows[0].role;
+      
+      // Проверяем права доступа
+      if (userRole === 'admin') {
+        // Админ имеет все права
+        req.userRole = userRole;
+        next();
+      } else if (userRole === requiredRole) {
+        // Проверяем конкретную роль
+        req.userRole = userRole;
+        next();
+      } else {
+        res.status(403).json({ error: 'Недостаточно прав' });
+      }
+    } catch (error) {
+      console.error('Ошибка проверки роли:', error);
+      res.status(500).json({ error: 'Ошибка сервера' });
+    }
+  };
+};
 // ========== ЭНДПОИНТЫ ==========
 
 // Telegram авторизация
@@ -291,7 +326,7 @@ app.get('/api/favorites', telegramAuthMiddleware, async (req, res) => {
       JOIN favorites f ON a.id = f.ad_id
       LEFT JOIN categories c ON a.category_id = c.id
       LEFT JOIN users u ON a.user_id = u.id
-      WHERE f.user_id = $1
+      WHERE f.user_id = $1 AND a.status = 'approved'
       ORDER BY f.created_at DESC
     `, [userId]);
 
@@ -482,7 +517,7 @@ app.get('/api/ads', async (req, res) => {
   FROM ads a
   LEFT JOIN categories c ON a.category_id = c.id
   LEFT JOIN users u ON a.user_id = u.id
-  WHERE (a.is_archived = false OR a.is_archived IS NULL) 
+WHERE a.status = 'approved' AND (a.is_archived = false OR a.is_archived IS NULL)
     `;
     let params = [];
     let paramIndex = 1;
@@ -1224,8 +1259,8 @@ app.post('/api/ads', telegramAuthMiddleware, upload.array('photos', 10), async (
     const photoUrlJson = photoUrls.length > 0 ? JSON.stringify(photoUrls) : null
 
     const insertResult = await pool.query(
-      `INSERT INTO ads (user_id, category_id, title, description, price, condition, photo_url, location, property_details)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
+      `INSERT INTO ads (user_id, category_id, title, description, price, condition, photo_url, location, property_details, status)
+ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending') RETURNING id`,
       [userId, categoryId, title, description, parseFloat(price), condition, photoUrlJson, location || null, JSON.stringify(parsedPropertyDetails)]
     )
 
@@ -1295,7 +1330,7 @@ app.get('/api/my-ads', telegramAuthMiddleware, async (req, res) => {
     c.name AS category_name
   FROM ads a
   LEFT JOIN categories c ON a.category_id = c.id
-  WHERE a.user_id = $1  
+  WHERE a.user_id = $1 AND (a.status != 'rejected' OR a.status IS NULL)
   ORDER BY a.created_at DESC
 `, [userId]);
 
@@ -1375,6 +1410,165 @@ app.delete('/api/ads/:id', telegramAuthMiddleware, async (req, res) => {
     res.status(500).json({ error: 'Ошибка сервера' });
   }
 });
+
+app.get('/api/admin/pending-ads', 
+  telegramAuthMiddleware, 
+  checkRole('moderator'),
+  async (req, res) => {
+    try {
+      const result = await pool.query(`
+        SELECT 
+          a.id, a.title, a.description, a.price, a.condition, a.created_at,
+          a.photo_url, a.location, a.property_details, a.status,
+          u.username AS user_username,
+          u.first_name AS user_first_name,
+          u.telegram_id AS user_telegram_id,
+          c.name AS category_name
+        FROM ads a
+        JOIN users u ON a.user_id = u.id
+        LEFT JOIN categories c ON a.category_id = c.id
+        WHERE a.status = 'pending'
+        ORDER BY a.created_at ASC
+      `);
+
+      const ads = result.rows.map(ad => {
+        if (ad.photo_url) {
+          try {
+            ad.photo_urls = JSON.parse(ad.photo_url);
+          } catch (e) {
+            ad.photo_urls = [];
+          }
+          delete ad.photo_url;
+        } else {
+          ad.photo_urls = [];
+        }
+        return ad;
+      });
+
+      res.json(ads);
+    } catch (error) {
+      console.error('Ошибка загрузки объявлений на модерацию:', error);
+      res.status(500).json({ error: 'Ошибка сервера' });
+    }
+  }
+);
+
+// 2. Одобрить объявление
+app.post('/api/admin/ads/:id/approve',
+  telegramAuthMiddleware,
+  checkRole('moderator'),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      
+      await pool.query(`
+        UPDATE ads 
+        SET status = 'approved',
+            rejection_reason = NULL
+        WHERE id = $1
+      `, [id]);
+      
+      res.json({ 
+        success: true, 
+        message: 'Объявление одобрено' 
+      });
+    } catch (error) {
+      console.error('Ошибка одобрения объявления:', error);
+      res.status(500).json({ error: 'Ошибка сервера' });
+    }
+  }
+);
+
+// 3. Отклонить объявление
+app.post('/api/admin/ads/:id/reject',
+  telegramAuthMiddleware,
+  checkRole('moderator'),
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { reason } = req.body;
+      
+      if (!reason || reason.trim() === '') {
+        return res.status(400).json({ error: 'Укажите причину отклонения' });
+      }
+      
+      await pool.query(`
+        UPDATE ads 
+        SET status = 'rejected',
+            rejection_reason = $2
+        WHERE id = $1
+      `, [id, reason.trim()]);
+      
+      res.json({ 
+        success: true, 
+        message: 'Объявление отклонено' 
+      });
+    } catch (error) {
+      console.error('Ошибка отклонения объявления:', error);
+      res.status(500).json({ error: 'Ошибка сервера' });
+    }
+  }
+);
+
+// 4. Получить статистику (только для админов)
+app.get('/api/admin/stats',
+  telegramAuthMiddleware,
+  checkRole('admin'),
+  async (req, res) => {
+    try {
+      const result = await pool.query(`
+        SELECT 
+          status,
+          COUNT(*) as count
+        FROM ads
+        GROUP BY status
+        ORDER BY status
+      `);
+      
+      const totalUsers = await pool.query('SELECT COUNT(*) as count FROM users');
+      const totalAds = await pool.query('SELECT COUNT(*) as count FROM ads');
+      
+      res.json({
+        adsByStatus: result.rows,
+        totalUsers: parseInt(totalUsers.rows[0].count),
+        totalAds: parseInt(totalAds.rows[0].count)
+      });
+    } catch (error) {
+      console.error('Ошибка загрузки статистики:', error);
+      res.status(500).json({ error: 'Ошибка сервера' });
+    }
+  }
+);
+
+// 5. Назначить/снять модератора (только для админов)
+app.post('/api/admin/users/:userId/set-role',
+  telegramAuthMiddleware,
+  checkRole('admin'),
+  async (req, res) => {
+    try {
+      const { userId } = req.params;
+      const { role } = req.body;
+      
+      if (!['moderator', 'admin', 'user'].includes(role)) {
+        return res.status(400).json({ error: 'Некорректная роль' });
+      }
+      
+      await pool.query(`
+        UPDATE users 
+        SET role = $1
+        WHERE id = $2
+      `, [role, userId]);
+      
+      res.json({ 
+        success: true, 
+        message: `Роль пользователя изменена на ${role}` 
+      });
+    } catch (error) {
+      console.error('Ошибка изменения роли:', error);
+      res.status(500).json({ error: 'Ошибка сервера' });
+    }
+  }
+);
 
 // Обработчик ошибок multer
 app.use((error, req, res, next) => {
