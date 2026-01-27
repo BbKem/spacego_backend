@@ -223,10 +223,10 @@ app.get('/api/user', telegramAuthMiddleware, async (req, res) => {
   try {
     const { telegramUser } = req;
     
-    const result = await pool.query(
-      'SELECT id, telegram_id, username, first_name, last_name, photo_url, created_at FROM users WHERE telegram_id = $1',
-      [telegramUser.id]
-    );
+   const result = await pool.query(
+  'SELECT id, telegram_id, username, first_name, last_name, photo_url, created_at, role FROM users WHERE telegram_id = $1',
+  [telegramUser.id]
+);
     
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Пользователь не найден' });
