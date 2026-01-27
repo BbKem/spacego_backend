@@ -1345,16 +1345,16 @@ app.get('/api/my-ads', telegramAuthMiddleware, async (req, res) => {
     const userId = userResult.rows[0].id;
 
     const result = await pool.query(`
-  SELECT
-    a.id, a.title, a.description, a.price, a.condition, a.created_at, 
-    a.photo_url, a.user_id, a.location, a.property_details,
-    a.is_archived, 
-    c.name AS category_name
-  FROM ads a
-  LEFT JOIN categories c ON a.category_id = c.id
-  WHERE a.user_id = $1 AND (a.status != 'rejected' OR a.status IS NULL)
-  ORDER BY a.created_at DESC
-`, [userId]);
+      SELECT
+        a.id, a.title, a.description, a.price, a.condition, a.created_at, 
+        a.photo_url, a.user_id, a.location, a.property_details,
+        a.is_archived, a.status,  // ← добавьте status
+        c.name AS category_name
+      FROM ads a
+      LEFT JOIN categories c ON a.category_id = c.id
+      WHERE a.user_id = $1
+      ORDER BY a.created_at DESC
+    `, [userId]);  
 
     const ads = result.rows.map(ad => {
       if (ad.photo_url) {
