@@ -83,21 +83,26 @@ const telegramAuthMiddleware = (req, res, next) => {
     console.log('✅ TEMPORARY: Skipping signature validation for now');
     
     // Парсим initData
-const params = new URLSearchParams(initData);
-const userStr = params.get('user');
+    const params = new URLSearchParams(initData);
+    const userStr = params.get('user');
+    
+    if (!userStr) {
+      return res.status(401).json({ error: 'Данные пользователя не найдены' });
+    }
 
-if (!userStr) {
-  return res.status(401).json({ error: 'Данные пользователя не найдены' });
+    const decodedUserStr = decodeURIComponent(userStr);
+const userData = JSON.parse(decodedUserStr);
+
+// 🔴 КРИТИЧЕСКИЙ ФИКС: сохраняем telegram_id как строку для точности
+if (userData && userData.id !== undefined) {
+  userData.id = String(userData.id);
 }
 
-// НЕ декодируем — Telegram WebApp уже присылает корректный JSON
-const userData = JSON.parse(userStr);
-
 req.telegramUser = userData;
-req.authDate = parseInt(params.get('auth_date'));
-
-console.log('✅ User authenticated (temporarily without validation):', userData.username);
-next();
+    req.authDate = parseInt(params.get('auth_date'));
+    
+    console.log('✅ User authenticated (temporarily without validation):', userData.username);
+    next();
   } catch (error) {
     console.error('Error in telegram auth middleware:', error);
     res.status(500).json({ error: 'Ошибка сервера' });
