@@ -1337,29 +1337,44 @@ app.get('/api/my-ads', telegramAuthMiddleware, async (req, res) => {
   try {
     const { telegramUser } = req;
     
+    console.log('=== /api/my-ads DEBUG ===');
+    console.log('telegramUser:', telegramUser);
+    console.log('telegramUser.id:', telegramUser.id, 'Type:', typeof telegramUser.id);
+    
+    // Явно конвертируем в строку ещё раз для уверенности
+    const telegramId = String(telegramUser.id);
+    console.log('Converted telegramId:', telegramId, 'Type:', typeof telegramId);
+    
     const userResult = await pool.query(
       'SELECT id FROM users WHERE telegram_id = $1',
-      [telegramUser.id]
+      [telegramId]
     );
     
+    console.log('User query result:', userResult.rows);
+    console.log('User found:', userResult.rows.length > 0);
+    
     if (userResult.rows.length === 0) {
+      console.error('❌ Пользователь не найден с telegram_id:', telegramId);
       return res.status(401).json({ error: 'Пользователь не найден' });
     }
     
     const userId = userResult.rows[0].id;
-
+    console.log('✅ Найден пользователь с id:', userId);
+    
     const result = await pool.query(`
       SELECT
-        a.id, a.title, a.description, a.price, a.condition, a.created_at, 
+        a.id, a.title, a.description, a.price, a.condition, a.created_at,
         a.photo_url, a.user_id, a.location, a.property_details,
-        a.is_archived, a.status,  // ← добавьте status
+        a.is_archived, a.status,
         c.name AS category_name
       FROM ads a
       LEFT JOIN categories c ON a.category_id = c.id
       WHERE a.user_id = $1
       ORDER BY a.created_at DESC
-    `, [userId]);  
-
+    `, [userId]);
+    
+    console.log('Ads query result count:', result.rows.length);
+    
     const ads = result.rows.map(ad => {
       if (ad.photo_url) {
         try {
@@ -1372,7 +1387,7 @@ app.get('/api/my-ads', telegramAuthMiddleware, async (req, res) => {
       } else {
         ad.photo_urls = [];
       }
-
+      
       if (ad.property_details) {
         try {
           // ad.property_details = JSON.parse(ad.property_details); // Уже парсится на бэкенде
@@ -1383,13 +1398,23 @@ app.get('/api/my-ads', telegramAuthMiddleware, async (req, res) => {
       } else {
         ad.property_details = {};
       }
-
+      
+      console.log('Processing ad:', {
+        id: ad.id,
+        title: ad.title,
+        status: ad.status,
+        is_archived: ad.is_archived,
+        user_id: ad.user_id
+      });
+      
       return ad;
     });
-
+    
+    console.log('✅ /api/my-ads returning', ads.length, 'ads');
     res.json(ads);
   } catch (err) {
-    console.error('Ошибка загрузки моих объявлений:', err);
+    console.error('❌ Ошибка загрузки моих объявлений:', err);
+    console.error('Stack trace:', err.stack);
     res.status(500).json({ error: 'Ошибка загрузки моих объявлений' });
   }
 });
