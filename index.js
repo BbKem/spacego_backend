@@ -1621,6 +1621,269 @@ app.post('/api/admin/users/:userId/set-role',
   }
 );
 
+// 2. Создать отзыв
+app.post('/api/reviews', telegramAuthMiddleware, async (req, res) => {
+  try {
+    const { telegramUser } = req;
+    const { revieweeId, rating, comment } = req.body;
+
+    // Валидация
+    if (!revieweeId || !rating || rating < 1 || rating > 5) {
+      return res.status(400).json({ error: 'Некорректные данные' });
+    }
+
+    // Получаем ID пользователя, который оставляет отзыв
+    const reviewerResult = await pool.query(
+      'SELECT id FROM users WHERE telegram_id = $1',
+      [telegramUser.id]
+    );
+    
+    if (reviewerResult.rows.length === 0) {
+      return res.status(401).json({ error: 'Пользователь не найден' });
+    }
+    
+    const reviewerId = reviewerResult.rows[0].id;
+
+    // Проверяем, что пользователь не оставляет отзыв сам себе
+    if (reviewerId === parseInt(revieweeId)) {
+      return res.status(400).json({ error: 'Нельзя оставить отзыв самому себе' });
+    }
+
+    // Проверяем, существует ли пользователь, которому оставляем отзыв
+    const revieweeResult = await pool.query(
+      'SELECT id FROM users WHERE id = $1',
+      [revieweeId]
+    );
+    
+    if (revieweeResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Пользователь не найден' });
+    }
+
+    // Проверяем, не оставляли ли уже отзыв этому пользователю
+    const existingReview = await pool.query(
+      'SELECT id FROM reviews WHERE reviewer_id = $1 AND reviewee_id = $2',
+      [reviewerId, revieweeId]
+    );
+
+    if (existingReview.rows.length > 0) {
+      return res.status(400).json({ error: 'Вы уже оставляли отзыв этому пользователю' });
+    }
+
+    // Создаем отзыв
+    const result = await pool.query(
+      `INSERT INTO reviews (reviewer_id, reviewee_id, rating, comment)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, rating, comment, created_at`,
+      [reviewerId, revieweeId, rating, comment || null]
+    );
+
+    // Обновляем средний рейтинг пользователя
+    await updateUserRating(revieweeId);
+
+    res.json({ 
+      success: true, 
+      review: result.rows[0],
+      message: 'Отзыв успешно добавлен'
+    });
+  } catch (error) {
+    console.error('Ошибка создания отзыва:', error);
+    res.status(500).json({ error: 'Ошибка сервера' });
+  }
+});
+
+// 3. Получить отзывы пользователя
+app.get('/api/users/:userId/reviews', async (req, res) => {
+  try {
+    const { userId } = req.params;
+    const { limit = 20, offset = 0 } = req.query;
+
+    // Проверяем существование пользователя
+    const userResult = await pool.query(
+      'SELECT id FROM users WHERE id = $1',
+      [userId]
+    );
+    
+    if (userResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Пользователь не найден' });
+    }
+
+    // Получаем отзывы с информацией об авторах
+    const reviewsResult = await pool.query(
+      `SELECT 
+        r.id, r.rating, r.comment, r.created_at,
+        u.id as reviewer_id,
+        u.telegram_id as reviewer_telegram_id,
+        u.username as reviewer_username,
+        u.first_name as reviewer_first_name,
+        u.last_name as reviewer_last_name,
+        u.photo_url as reviewer_photo_url
+       FROM reviews r
+       JOIN users u ON r.reviewer_id = u.id
+       WHERE r.reviewee_id = $1
+       ORDER BY r.created_at DESC
+       LIMIT $2 OFFSET $3`,
+      [userId, parseInt(limit), parseInt(offset)]
+    );
+
+    // Получаем статистику отзывов
+    const statsResult = await pool.query(
+      `SELECT 
+        COUNT(*) as total,
+        AVG(rating) as average_rating,
+        COUNT(CASE WHEN rating = 5 THEN 1 END) as five_stars,
+        COUNT(CASE WHEN rating = 4 THEN 1 END) as four_stars,
+        COUNT(CASE WHEN rating = 3 THEN 1 END) as three_stars,
+        COUNT(CASE WHEN rating = 2 THEN 1 END) as two_stars,
+        COUNT(CASE WHEN rating = 1 THEN 1 END) as one_stars
+       FROM reviews
+       WHERE reviewee_id = $1`,
+      [userId]
+    );
+
+    const stats = statsResult.rows[0];
+    const averageRating = stats.average_rating ? parseFloat(stats.average_rating).toFixed(1) : '0.0';
+
+    res.json({
+      success: true,
+      reviews: reviewsResult.rows,
+      stats: {
+        total: parseInt(stats.total),
+        averageRating: averageRating,
+        distribution: {
+          5: parseInt(stats.five_stars) || 0,
+          4: parseInt(stats.four_stars) || 0,
+          3: parseInt(stats.three_stars) || 0,
+          2: parseInt(stats.two_stars) || 0,
+          1: parseInt(stats.one_stars) || 0
+        }
+      }
+    });
+  } catch (error) {
+    console.error('Ошибка получения отзывов:', error);
+    res.status(500).json({ error: 'Ошибка сервера' });
+  }
+});
+
+// 4. Удалить свой отзыв
+app.delete('/api/reviews/:id', telegramAuthMiddleware, async (req, res) => {
+  try {
+    const { telegramUser } = req;
+    const { id } = req.params;
+
+    // Получаем ID пользователя
+    const userResult = await pool.query(
+      'SELECT id FROM users WHERE telegram_id = $1',
+      [telegramUser.id]
+    );
+    
+    if (userResult.rows.length === 0) {
+      return res.status(401).json({ error: 'Пользователь не найден' });
+    }
+    
+    const userId = userResult.rows[0].id;
+
+    // Находим отзыв
+    const reviewResult = await pool.query(
+      'SELECT reviewer_id, reviewee_id FROM reviews WHERE id = $1',
+      [id]
+    );
+    
+    if (reviewResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Отзыв не найден' });
+    }
+
+    const review = reviewResult.rows[0];
+
+    // Проверяем права (только автор может удалить)
+    if (review.reviewer_id !== userId) {
+      return res.status(403).json({ error: 'Недостаточно прав' });
+    }
+
+    // Удаляем отзыв
+    await pool.query('DELETE FROM reviews WHERE id = $1', [id]);
+
+    // Обновляем рейтинг пользователя
+    await updateUserRating(review.reviewee_id);
+
+    res.json({ 
+      success: true, 
+      message: 'Отзыв удален' 
+    });
+  } catch (error) {
+    console.error('Ошибка удаления отзыва:', error);
+    res.status(500).json({ error: 'Ошибка сервера' });
+  }
+});
+
+// 5. Проверить, может ли пользователь оставить отзыв
+app.get('/api/users/:userId/can-review', telegramAuthMiddleware, async (req, res) => {
+  try {
+    const { telegramUser } = req;
+    const { userId } = req.params;
+
+    // Получаем ID пользователя
+    const reviewerResult = await pool.query(
+      'SELECT id FROM users WHERE telegram_id = $1',
+      [telegramUser.id]
+    );
+    
+    if (reviewerResult.rows.length === 0) {
+      return res.status(401).json({ error: 'Пользователь не найден' });
+    }
+    
+    const reviewerId = reviewerResult.rows[0].id;
+
+    // Проверяем, что не сам себе
+    if (reviewerId === parseInt(userId)) {
+      return res.json({ canReview: false, reason: 'Нельзя оставить отзыв самому себе' });
+    }
+
+    // Проверяем, не оставляли ли уже отзыв
+    const existingReview = await pool.query(
+      'SELECT id FROM reviews WHERE reviewer_id = $1 AND reviewee_id = $2',
+      [reviewerId, userId]
+    );
+
+    if (existingReview.rows.length > 0) {
+      return res.json({ 
+        canReview: false, 
+        reason: 'Вы уже оставляли отзыв этому пользователю',
+        existingReviewId: existingReview.rows[0].id
+      });
+    }
+
+    res.json({ canReview: true });
+  } catch (error) {
+    console.error('Ошибка проверки возможности отзыва:', error);
+    res.status(500).json({ error: 'Ошибка сервера' });
+  }
+});
+
+// Вспомогательная функция для обновления рейтинга пользователя
+async function updateUserRating(userId) {
+  try {
+    const result = await pool.query(
+      `SELECT AVG(rating) as avg_rating, COUNT(*) as count
+       FROM reviews WHERE reviewee_id = $1`,
+      [userId]
+    );
+
+    const avgRating = result.rows[0].avg_rating;
+    const reviewCount = result.rows[0].count;
+
+    await pool.query(
+      `UPDATE users 
+       SET rating = $1, 
+           review_count = $2,
+           rating_updated_at = NOW()
+       WHERE id = $3`,
+      [avgRating || null, reviewCount, userId]
+    );
+  } catch (error) {
+    console.error('Ошибка обновления рейтинга:', error);
+  }
+}
+
 // Обработчик ошибок multer
 app.use((error, req, res, next) => {
   if (error instanceof multer.MulterError) {
