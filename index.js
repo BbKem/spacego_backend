@@ -917,12 +917,6 @@ WHERE a.status = 'approved' AND (a.is_archived = false OR a.is_archived IS NULL)
       query += ` AND a.photo_url IS NOT NULL`;
     }
     
-     if (user_id) {
-      query += ` AND a.user_id = $${paramIndex}`;
-      params.push(parseInt(user_id));
-      paramIndex++;
-    }
-    
     query += ' ORDER BY a.created_at DESC LIMIT 50';
 
     console.log("SQL Query:", query);
