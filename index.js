@@ -565,12 +565,6 @@ WHERE a.status = 'approved' AND (a.is_archived = false OR a.is_archived IS NULL)
       }
     }
 
-    if (user_id) {
-  query += ` AND a.user_id = $${paramIndex}`;
-  params.push(parseInt(user_id));
-  paramIndex++;
-}
-
     if (min_price) {
       query += ` AND a.price >= $${paramIndex}`;
       params.push(parseFloat(min_price));
