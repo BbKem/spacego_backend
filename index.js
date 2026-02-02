@@ -1621,6 +1621,77 @@ app.post('/api/admin/users/:userId/set-role',
   }
 );
 
+// Получить активные объявления пользователя по ID
+// Получить активные объявления пользователя по ID
+app.get('/api/users/:userId/ads', async (req, res) => {
+  const { userId } = req.params;
+
+  try {
+    // Проверяем существование пользователя
+    const userCheck = await pool.query(
+      'SELECT id FROM users WHERE id = $1',
+      [userId]
+    );
+    
+    if (userCheck.rows.length === 0) {
+      return res.status(404).json({ error: 'Пользователь не найден' });
+    }
+
+    const result = await pool.query(`
+      SELECT
+        a.id, a.title, a.description, a.price, a.condition, a.created_at, 
+        a.photo_url, a.user_id, a.location, a.property_details, a.status, a.is_archived,
+        c.name AS category_name,
+        u.username AS user_username,
+        u.first_name AS user_first_name,
+        u.last_name AS user_last_name,
+        u.photo_url AS user_photo_url,
+        u.telegram_id AS user_telegram_id
+      FROM ads a
+      LEFT JOIN categories c ON a.category_id = c.id
+      LEFT JOIN users u ON a.user_id = u.id
+      WHERE a.user_id = $1 
+        AND a.status = 'approved'
+        AND (a.is_archived = false OR a.is_archived IS NULL)
+      ORDER BY a.created_at DESC
+    `, [userId]);
+
+    const ads = result.rows.map(ad => {
+      if (ad.photo_url) {
+        try {
+          ad.photo_urls = JSON.parse(ad.photo_url);
+        } catch (e) {
+          console.error("Ошибка парсинга photo_url в /api/users/:userId/ads:", e);
+          ad.photo_urls = [];
+        }
+        delete ad.photo_url;
+      } else {
+        ad.photo_urls = [];
+      }
+
+      if (ad.property_details) {
+        try {
+          // Проверяем, нужно ли парсить
+          if (typeof ad.property_details === 'string') {
+            ad.property_details = JSON.parse(ad.property_details);
+          }
+        } catch (e) {
+          console.error("Ошибка парсинга property_details в /api/users/:userId/ads:", e);
+          ad.property_details = {};
+        }
+      } else {
+        ad.property_details = {};
+      }
+      return ad;
+    });
+
+    res.json(ads);
+  } catch (err) {
+    console.error('Ошибка загрузки объявлений пользователя:', err);
+    res.status(500).json({ error: 'Ошибка загрузки объявлений' });
+  }
+});
+
 // 2. Создать отзыв
 app.post('/api/reviews', telegramAuthMiddleware, async (req, res) => {
   try {
