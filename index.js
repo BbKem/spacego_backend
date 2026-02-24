@@ -1622,7 +1622,6 @@ app.post('/api/admin/users/:userId/set-role',
 );
 
 // Получить активные объявления пользователя по ID
-// Получить активные объявления пользователя по ID
 app.get('/api/users/:userId/ads', async (req, res) => {
   const { userId } = req.params;
 
